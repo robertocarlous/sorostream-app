@@ -1,5 +1,5 @@
 "use client";
-import { useState, Suspense } from "react";
+import { useState, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import DurationPicker from "@/components/DurationPicker";
 import FlowRatePreview from "@/components/FlowRatePreview";
@@ -10,8 +10,25 @@ import { SkeletonForm } from "@/components/Skeleton";
 import { useTranslations } from "@/src/lib/i18n";
 import { trackEvent } from "@/src/lib/analytics";
 import { sorostream } from "@/src/lib/sorostream";
+import { useToast } from "@/src/lib/toast";
 
 type Step = "recipient" | "amount" | "review";
+
+/** Max time to wait for a submission attempt before resubmitting. */
+const SUBMIT_TIMEOUT_MS = 8_000;
+/** How many times to automatically resubmit after a timeout before giving up. */
+const MAX_RESUBMIT_ATTEMPTS = 2;
+
+/** Rejects with a `SUBMIT_TIMEOUT` error if `promise` doesn't settle within `ms`. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("SUBMIT_TIMEOUT")), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 const SUPPORTED_TOKENS = [
   { symbol: "USDC", name: "USD Coin",        address: "CAQCFVLOBK5GIULPNZRGATJJMIZL5BSP7X5YJVMGCPTUEPFM4AVSRCJU" },
@@ -82,6 +99,7 @@ const STEPS: Step[] = ["recipient", "amount", "review"];
 function NewStreamWizard() {
   const router = useRouter();
   const t = useTranslations("stream_new");
+  const { addToast } = useToast();
   const [step, setStep] = useState<Step>("recipient");
   const searchParams = useSearchParams();
 
@@ -123,6 +141,13 @@ function NewStreamWizard() {
   const [txStage, setTxStage] = useState<TxStage | null>(null);
   const [txFailedStage, setTxFailedStage] = useState<TxStage | undefined>(undefined);
   const [txError, setTxError] = useState<string | undefined>(undefined);
+  // Number of automatic resubmissions for the current submission (0 = none yet).
+  // Drives an inline spinner-update message rather than a separate toast.
+  const [resubmitAttempt, setResubmitAttempt] = useState(0);
+  // Identifies the current logical submission so a stale/late attempt can't
+  // fire a second success toast — cleared naturally on unmount/refresh since
+  // it's plain in-memory ref state, never persisted.
+  const submissionIdRef = useRef(0);
 
   function handleTemplateSelect(seconds: number, suggestedAmount?: string, recipientOverride?: string) {
     setDuration(seconds);
@@ -202,7 +227,10 @@ function NewStreamWizard() {
     setTxStage(TxStage.Building);
     setTxFailedStage(undefined);
     setTxError(undefined);
+    setResubmitAttempt(0);
     trackEvent({ type: "stream_create_start" });
+
+    const submissionId = ++submissionIdRef.current;
 
     try {
       // Building phase — construct the tx envelope
@@ -217,16 +245,40 @@ function NewStreamWizard() {
       await new Promise((r) => setTimeout(r, 300));
       setTxStage(TxStage.Confirming);
 
-      // Confirming phase — actual SDK call
-      const result = await sorostream.createStream({
+      // Confirming phase — actual SDK call. If a submission attempt takes too
+      // long we resubmit automatically, staying on the same "Confirming" stage
+      // (surfaced as a spinner-update, not a new toast) instead of showing a
+      // toast per attempt — only the attempt that actually confirms gets one.
+      const createParams = {
         recipient,
         amount,
         durationSeconds: duration,
         token: selectedToken === CUSTOM_TOKEN_VALUE ? tokenAddress : selectedToken,
-      });
+      };
+
+      let result: Awaited<ReturnType<typeof sorostream.createStream>> | null = null;
+      let attempt = 0;
+      while (result === null) {
+        try {
+          result = await withTimeout(sorostream.createStream(createParams), SUBMIT_TIMEOUT_MS);
+        } catch (attemptErr) {
+          const timedOut = attemptErr instanceof Error && attemptErr.message === "SUBMIT_TIMEOUT";
+          if (timedOut && attempt < MAX_RESUBMIT_ATTEMPTS) {
+            attempt += 1;
+            setResubmitAttempt(attempt);
+            continue;
+          }
+          throw attemptErr;
+        }
+      }
+
+      // A newer submission superseded this one — nothing else on screen still
+      // refers to it, so drop this stale result instead of surfacing a toast.
+      if (submissionId !== submissionIdRef.current) return;
 
       setTxStage(TxStage.Done);
       trackEvent({ type: "stream_create_complete", streamId: result.streamId });
+      addToast(`Stream created successfully — tx ${result.txHash}`, "success");
 
       // Auto-close after 2 seconds, then redirect
       await new Promise((r) => setTimeout(r, 2000));
@@ -265,6 +317,11 @@ function NewStreamWizard() {
                 failedStage={txFailedStage}
                 errorMessage={txError}
               />
+              {resubmitAttempt > 0 && txStage === TxStage.Confirming && !txFailedStage && (
+                <p className="text-center text-xs text-yellow-400" aria-live="polite">
+                  Taking longer than expected — resubmitting… (attempt {resubmitAttempt})
+                </p>
+              )}
               {txFailedStage && (
                 <button
                   type="button"
