@@ -68,7 +68,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
       </head>
       <body className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
-      <body className="min-h-screen">
         <a href="#main-content" className="skip-link">
           Skip to main content
         </a>

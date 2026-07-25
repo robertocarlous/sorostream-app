@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { useFocusTrap } from "@/src/lib/useFocusTrap";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -79,6 +79,14 @@ export default function StreamDetail({ params }: { params: { id: string } }) {
   const { address, refetchBalance } = useWallet();
   const { isBookmarked, toggleBookmark } = useBookmarks();
   const [withdrawConfirmAmount, setWithdrawConfirmAmount] = useState<string | null>(null);
+
+  // Scroll to top on entry/route-param change — App Router doesn't reset scroll
+  // for dynamic-segment navigations, so a scrolled-down dashboard would otherwise
+  // leave this page mid-scroll (#305). useLayoutEffect avoids a visible flash of
+  // the wrong scroll position before paint.
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [params.id]);
 
   // ── Stream data ────────────────────────────────────────────────────────────
   const [stream, setStream] = useState<StreamData | null>(null);
