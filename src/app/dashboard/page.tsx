@@ -7,10 +7,8 @@ import StreamVirtualList from "@/components/StreamVirtualList";
 import StreamEventFeed from "@/components/StreamEventFeed";
 import PortfolioChart from "@/components/PortfolioChart";
 import KeyboardShortcutsHelp from "@/components/KeyboardShortcutsHelp";
-import PortfolioChart from "@/components/PortfolioChart";
 import StatusLegend from "@/components/StatusLegend";
 import { StreamErrorBoundary } from "@/components/StreamErrorBoundary";
-import { getMockStreams, watchClaimable, sorostream, getMockStreamHistory, StreamData } from "@/src/lib/sorostream";
 import { getMockStreams, getStreamsForWallet, watchClaimable, sorostream, getMockStreamHistory, StreamData } from "@/src/lib/sorostream";
 import { useRpcFetch } from "@/src/lib/useRpcFetch";
 import { useToast } from "@/src/lib/toast";
@@ -21,6 +19,8 @@ import { useWallet } from "@/src/context/WalletContext";
 import ArchiveBanner from "@/components/ArchiveBanner";
 
 type DashboardState = "loading" | "filtered-empty" | "empty" | "ready";
+
+type Tab = "sent" | "received";
 
 type SortField = "created" | "endDate" | "amount" | "status";
 type SortOrder = "asc" | "desc";
@@ -44,6 +44,11 @@ function DashboardContent() {
   const { address } = useWallet();
   const [loading, setLoading] = useState(true);
   const [streams, setStreams] = useState<StreamData[]>([]);
+
+  // Sent/Received tab, persisted to the URL like the other filters
+  const [activeTab, setActiveTab] = useState<Tab>(
+    searchParams.get("tab") === "received" ? "received" : "sent",
+  );
 
   // Filter states from URL params
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") || "");
@@ -130,8 +135,42 @@ function DashboardContent() {
     return Array.from(tokens).sort();
   }, [streams]);
 
+  // getStreamsForWallet matches on a truncated address prefix (see sorostream.ts),
+  // so we reuse that same convention to split the combined list into sent/received.
+  const isOwnedBy = useCallback(
+    (field: string) => !!address && field.includes(address.slice(0, 5)),
+    [address],
+  );
+
+  const sentStreams = useMemo(
+    () => streams.filter((s) => isOwnedBy(s.sender)),
+    [streams, isOwnedBy],
+  );
+  const receivedStreams = useMemo(
+    () => streams.filter((s) => isOwnedBy(s.recipient)),
+    [streams, isOwnedBy],
+  );
+
+  // Active counts for the tab badges — recomputed from `streams` on every poll
+  // tick, so a stream moving to "Ended"/"Cancelled" drops out immediately.
+  const sentActiveCount = useMemo(
+    () => sentStreams.filter((s) => s.status === "Active").length,
+    [sentStreams],
+  );
+  const receivedActiveCount = useMemo(
+    () => receivedStreams.filter((s) => s.status === "Active").length,
+    [receivedStreams],
+  );
+
+  const tabStreams = activeTab === "sent" ? sentStreams : receivedStreams;
+
+  const handleTabChange = useCallback((tab: Tab) => {
+    setActiveTab(tab);
+    setSelectedIds(new Set());
+  }, []);
+
   const filtered = useMemo(() => {
-    return streams.filter((s) => {
+    return tabStreams.filter((s) => {
       if (bookmarksOnly && !bookmarkedIds.has(s.id)) return false;
       if (statusFilter && s.status !== statusFilter) return false;
       if (tokenFilter && s.token !== tokenFilter) return false;
@@ -145,7 +184,7 @@ function DashboardContent() {
       }
       return true;
     });
-  }, [streams, statusFilter, tokenFilter, search, bookmarksOnly, bookmarkedIds]);
+  }, [tabStreams, statusFilter, tokenFilter, search, bookmarksOnly, bookmarkedIds]);
 
   // Sort filtered streams, pinning bookmarks first, then by the chosen sort field.
   const sortedFiltered = useMemo(() => {
@@ -176,6 +215,7 @@ function DashboardContent() {
   // Update URL params when filters change
   useEffect(() => {
     const params = new URLSearchParams();
+    if (activeTab !== "sent") params.set("tab", activeTab);
     if (statusFilter) params.set("status", statusFilter);
     if (tokenFilter) params.set("token", tokenFilter);
     if (search.trim()) params.set("search", search);
@@ -183,7 +223,7 @@ function DashboardContent() {
     const queryString = params.toString();
     const newPath = queryString ? `/dashboard?${queryString}` : "/dashboard";
     router.replace(newPath);
-  }, [statusFilter, tokenFilter, search, router]);
+  }, [activeTab, statusFilter, tokenFilter, search, router]);
 
   const clearFilters = () => {
     setStatusFilter("");
@@ -297,6 +337,35 @@ function DashboardContent() {
           >
             + New Stream
           </Link>
+        </div>
+
+        <div className="mb-6 flex gap-2" role="tablist" aria-label="Stream direction">
+          {(["sent", "received"] as Tab[]).map((tab) => {
+            const count = tab === "sent" ? sentActiveCount : receivedActiveCount;
+            const isActive = activeTab === tab;
+            return (
+              <button
+                key={tab}
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => handleTabChange(tab)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium capitalize transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2 focus-visible:ring-offset-gray-900 ${
+                  isActive
+                    ? "bg-green-700 text-white"
+                    : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                }`}
+              >
+                {tab}
+                <span
+                  className={`inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-xs ${
+                    isActive ? "bg-green-900 text-green-200" : "bg-gray-700 text-gray-300"
+                  }`}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="flex flex-col lg:flex-row gap-6">
